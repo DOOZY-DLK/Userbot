@@ -1,80 +1,179 @@
 import os
 import random
 import asyncio
+import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait, ReactionInvalid, MessageNotModified, PeerIdInvalid
 
-# Userbot session
+# === CONFIG ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Client(
     "my_userbot",
-    api_id=int(os.environ.get("API_ID", "11447635")),
-    api_hash=os.environ.get("API_HASH", "fd48e41738daae23b21d25610448da3c"),
-    session_string=os.environ.get("SESSION_STRING", "BQCurVMAGg7Siis7_zpZiQMzsrXLJ-Ll6N8CkvsIXJ1rVVxg91H95eqngKuH4_RQGNiqgawRjf603d_Nxgg8FgNBOfFMpFr51-L2jznZshsFG7suKi94idHR5K6-WV7xPtMbBevfVjW_P-wvwOzW1VbJ4YF2Cjan9bHL7FpfXSWecg8Bwl6zH041DNy5VAYQkE-LubCCLwZ9Gqm49yQHmgKMeaoRjM59siN08NrMbwPwP2DpeOZsAxCKuFysC-0f-emOHGWsl3IJKR0UI44x1tz6wphKJASlR0FoorFh7KYyNTswCEP9uOUBJHXiHz-CswVD46H7gM5y79sbXE-iS_w1U7ZjhAAAAAF86bnEAA")
+    api_id=int(os.environ.get("API_ID", "22971197")),
+    api_hash=os.environ.get("API_HASH", "a46aaab0cf1854c634dde4566c827b71"),
+    session_string=os.environ.get(
+        "SESSION_STRING",
+        "BQFegz0Ap3Jxlmhy2KNVtpnSR5W0Ijzn_4R8NezYrR89LEjTemrTc-iSsFQ6iSvD0da-OR5G_Sc-q9x_eWWA5-Qy3DJCOg-UZLLbfpMROp-wfkaSGM5H4p5DGrK-1ZKUko5i6i6tJ7324dAiaIdVT231whhoLZddVhIhsC0l9wAF4c-edsY9lodHTNJ2tLSpjCTLBTfc8opepqErWZumlBmGz_O7xCqpWQrXn2JSQtYwuZGLnh5yFHDLSet2m7j-bEKMPLJWv_6i0EhBHJNuVY8Z0RMrmS_o1pJydcEC31A232Irja3dCeqdbbcppxzZW-qHwIy699GDnWAjYd5jhIxDQreG_wAAAAFgu_1oAA"
+    ),
+    in_memory=True
 )
 
-# Emojis list
-emojis = [
-    "🥰", "❤️", "💋", "👍", "👏", "😂", "😊", "🎉", "🤔", "😎",
-    "🙏", "💯", "🔥", "😍", "🤣", "🙂", "🤗", "🥳", "😇", "💖"
+# Valid Telegram reaction emojis
+VALID_EMOJIS = [
+    "ð", "ð", "â¤ï¸", "ð¥", "ð¥°", "ð", "ð", "ð¤", "ð¤¯", "ð±",
+    "ð¤¬", "ð¢", "ð", "ð¤©", "ð¤®", "ð©", "ð", "ð", "ð¤¡",
+    "ð¥±", "ð¥´", "ð", "ð³", "â¤ï¸âð¥", "ð­", "ð¯", "ð¤£", "â¡", "ð",
+    "ð", "ð", "ð¤¨", "ð", "ð", "ð¾", "ð", "ð", "ð", "ð´"
 ]
 
 react_status = {}
+alive_sent = False
 
-@app.on_message(filters.command("react") & filters.group)
-async def toggle_react(client, message: Message):
+# === ALIVE MESSAGE ===
+async def send_alive():
+    global alive_sent
+    if alive_sent:
+        return
+    try:
+        await app.send_message(
+            "me",
+            "**ð Auto React Userbot FULLY ACTIVE!**\n\n"
+            "â Reacts in **Private, Groups, Channels**\n"
+            "â Skips **edited & replied** messages\n"
+            "âï¸ Use `/react` â **ON/OFF per chat**\n"
+            "ð¢ **Status: ONLINE & REACTING EVERYWHERE**",
+            disable_web_page_preview=True
+        )
+        alive_sent = True
+        logger.info("Alive message sent.")
+    except Exception as e:
+        logger.error(f"Failed to send alive: {e}")
+
+# === TOGGLE COMMAND ===
+@app.on_message(filters.command("react") & (filters.group | filters.channel))
+async def toggle_react(client: Client, message: Message):
     chat_id = message.chat.id
     current = react_status.get(chat_id, True)
-    
+
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ ON", callback_data=f"react_on_{chat_id}"),
-            InlineKeyboardButton("❌ OFF", callback_data=f"react_off_{chat_id}")
+            InlineKeyboardButton("ð¢ ON", callback_data=f"react_on_{chat_id}"),
+            InlineKeyboardButton("ð´ OFF", callback_data=f"react_off_{chat_id}")
         ],
-        [InlineKeyboardButton("🗑️ Close", callback_data=f"react_close_{message.id}")]
+        [InlineKeyboardButton("ðï¸ Close", callback_data="react_close")]
     ])
-    
+
     await message.reply(
-        f"**🤖 Auto React (Userbot Mode)**\n\nStatus: `{'ON' if current else 'OFF'}`",
+        f"**ð¤ Auto React Controller**\n\n"
+        f"**Chat:** `{message.chat.title or 'Channel'}`\n"
+        f"**Status:** `{'ð¢ ON' if current else 'ð´ OFF'}`",
         reply_markup=keyboard
     )
 
-@app.on_callback_query(filters.regex("^react_"))
-async def callback_handler(client, cb: CallbackQuery):
+# === CALLBACK HANDLER ===
+@app.on_callback_query(filters.regex("^react_(on|off|close)_"))
+async def callback_handler(client: Client, cb: CallbackQuery):
     data = cb.data
     chat_id = cb.message.chat.id
-    
-    if data.startswith("react_on_"):
-        react_status[chat_id] = True
-        text = "✅ **Auto reactions ON!** (Userbot)"
-    elif data.startswith("react_off_"):
-        react_status[chat_id] = False
-        text = "❌ **Auto reactions OFF!**"
-    elif data.startswith("react_close_"):
-        await cb.message.delete()
-        return
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗑️ Close", callback_data=f"react_close_{cb.message.id}")]
-    ])
-    
-    await cb.edit_message_text(text, reply_markup=keyboard)
-    await cb.answer("✅ Updated!")
 
-@app.on_message(filters.group & ~filters.command(["react"]))
-async def auto_react(client, message: Message):
+    try:
+        if data.startswith("react_on_"):
+            react_status[chat_id] = True
+            text = "ð¢ **Auto React ENABLED!**"
+        elif data.startswith("react_off_"):
+            react_status[chat_id] = False
+            text = "ð´ **Auto React DISABLED!**"
+        elif data == "react_close":
+            await cb.message.delete()
+            await cb.answer()
+            return
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðï¸ Close", callback_data="react_close")]
+        ])
+        await cb.edit_message_text(text, reply_markup=keyboard)
+        await cb.answer("â Updated!")
+
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        await cb.answer("â ï¸ Error!", show_alert=True)
+
+# === MAIN AUTO REACT â NOW WORKS IN PRIVATE TOO ===
+@app.on_message(
+    (filters.private | filters.group | filters.channel) &
+    filters.incoming &
+    ~filters.reply &
+    ~filters.command("react")
+)
+async def auto_react(client: Client, message: Message):
+    # Skip edited messages
+    if message.edit_date:
+        return
+
     chat_id = message.chat.id
-    
-    # Check if auto-react is ON for this chat
     if not react_status.get(chat_id, True):
         return
-    
-    # Random emoji
-    emoji = random.choice(emojis)
-    
+
+    if not message.id:
+        return
+
+    emoji = random.choice(VALID_EMOJIS)
+
     try:
         await message.react(emoji=emoji)
+        logger.info(f"Reacted {emoji} â {chat_id} | Msg ID: {message.id}")
+    except ReactionInvalid:
+        pass
+    except FloodWait as e:
+        logger.warning(f"FloodWait: sleeping {e.value}s")
+        await asyncio.sleep(e.value)
+    except PeerIdInvalid:
+        logger.warning(f"PeerIdInvalid skipped: {chat_id}")
+        # Auto-resolve by fetching chat
+        try:
+            await app.get_chat(chat_id)
+        except:
+            pass
     except Exception as e:
-        print(f"React error: {e}")
+        error = str(e)
+        if "MESSAGE_ID_INVALID" in error or "REACTION_INVALID" in error:
+            pass
+        else:
+            logger.error(f"React failed: {error}")
 
-# Start the bot
-app.run()
+# === AUTO SEND ALIVE ON FIRST PRIVATE MESSAGE FROM YOU ===
+@app.on_message(filters.private & filters.me)
+async def auto_start_trigger(client: Client, message: Message):
+    await send_alive()
+
+# === MAIN STARTUP ===
+async def main():
+    try:
+        await app.start()
+        me = await app.get_me()
+        logger.info(f"Userbot started as @{me.username or me.first_name}")
+
+        await send_alive()
+
+        # Keep alive forever
+        await asyncio.Event().wait()
+
+    except Exception as e:
+        logger.critical(f"Startup failed: {e}")
+        await asyncio.sleep(5)
+        os._exit(1)
+
+# === RUN ===
+if __name__ == "__main__":
+    try:
+        app.run(main())
+    except KeyboardInterrupt:
+        logger.info("Userbot stopped by user.")
+    except Exception as e:
+        logger.critical(f"Critical error: {e}")
+        os._exit(1)
