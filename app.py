@@ -134,7 +134,7 @@ async def auto_react(client: Client, message: Message):
         await asyncio.sleep(e.value)
     except PeerIdInvalid:
         logger.warning(f"PeerIdInvalid skipped: {chat_id}")
-        # Auto-resolve by fetching chat
+        
         try:
             await app.get_chat(chat_id)
         except:
