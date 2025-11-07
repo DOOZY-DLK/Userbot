@@ -23,10 +23,10 @@ app = Client(
 
 # Valid Telegram reaction emojis
 VALID_EMOJIS = [
-    "ð", "ð", "â¤ï¸", "ð¥", "ð¥°", "ð", "ð", "ð¤", "ð¤¯", "ð±",
-    "ð¤¬", "ð¢", "ð", "ð¤©", "ð¤®", "ð©", "ð", "ð", "ð¤¡",
-    "ð¥±", "ð¥´", "ð", "ð³", "â¤ï¸âð¥", "ð­", "ð¯", "ð¤£", "â¡", "ð",
-    "ð", "ð", "ð¤¨", "ð", "ð", "ð¾", "ð", "ð", "ð", "ð´"
+    "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🤡",
+    "🥱", "🥴", "😍", "🐳", "❤️‍🔥", "🌭", "💯", "🤣", "⚡", "🍌",
+    "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴"
 ]
 
 react_status = {}
@@ -40,11 +40,11 @@ async def send_alive():
     try:
         await app.send_message(
             "me",
-            "**ð Auto React Userbot FULLY ACTIVE!**\n\n"
-            "â Reacts in **Private, Groups, Channels**\n"
-            "â Skips **edited & replied** messages\n"
-            "âï¸ Use `/react` â **ON/OFF per chat**\n"
-            "ð¢ **Status: ONLINE & REACTING EVERYWHERE**",
+            "**Auto React Userbot FULLY ACTIVE!**\n\n"
+            "Reacts in **Private, Groups, Channels**\n"
+            "Skips **edited & replied** messages\n"
+            "Use `/react` **ON/OFF per chat**\n"
+            "**Status: ONLINE & REACTING EVERYWHERE**",
             disable_web_page_preview=True
         )
         alive_sent = True
@@ -60,16 +60,16 @@ async def toggle_react(client: Client, message: Message):
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("ð¢ ON", callback_data=f"react_on_{chat_id}"),
-            InlineKeyboardButton("ð´ OFF", callback_data=f"react_off_{chat_id}")
+            InlineKeyboardButton("ON", callback_data=f"react_on_{chat_id}"),
+            InlineKeyboardButton("OFF", callback_data=f"react_off_{chat_id}")
         ],
-        [InlineKeyboardButton("ðï¸ Close", callback_data="react_close")]
+        [InlineKeyboardButton("Close", callback_data="react_close")]
     ])
 
     await message.reply(
-        f"**ð¤ Auto React Controller**\n\n"
+        f"**Auto React Controller**\n\n"
         f"**Chat:** `{message.chat.title or 'Channel'}`\n"
-        f"**Status:** `{'ð¢ ON' if current else 'ð´ OFF'}`",
+        f"**Status:** `{'ON' if current else 'OFF'}`",
         reply_markup=keyboard
     )
 
@@ -82,26 +82,26 @@ async def callback_handler(client: Client, cb: CallbackQuery):
     try:
         if data.startswith("react_on_"):
             react_status[chat_id] = True
-            text = "ð¢ **Auto React ENABLED!**"
+            text = "**Auto React ENABLED!**"
         elif data.startswith("react_off_"):
             react_status[chat_id] = False
-            text = "ð´ **Auto React DISABLED!**"
+            text = "**Auto React DISABLED!**"
         elif data == "react_close":
             await cb.message.delete()
             await cb.answer()
             return
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("ðï¸ Close", callback_data="react_close")]
+            [InlineKeyboardButton("Close", callback_data="react_close")]
         ])
         await cb.edit_message_text(text, reply_markup=keyboard)
-        await cb.answer("â Updated!")
+        await cb.answer("Updated!")
 
     except MessageNotModified:
         pass
     except Exception as e:
         logger.error(f"Callback error: {e}")
-        await cb.answer("â ï¸ Error!", show_alert=True)
+        await cb.answer("Error!", show_alert=True)
 
 # === MAIN AUTO REACT â NOW WORKS IN PRIVATE TOO ===
 @app.on_message(
@@ -168,7 +168,7 @@ async def main():
         await asyncio.sleep(5)
         os._exit(1)
 
-# === RUN ===
+# RUN
 if __name__ == "__main__":
     try:
         app.run(main())
