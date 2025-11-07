@@ -23,7 +23,7 @@ Automatically reacts to **new messages** in **PMs, Groups & Channels** with rand
   ```python
   from pyrogram import Client
   app = Client("session", api_id=YOUR_ID, api_hash="YOUR_HASH")
-  app.start(); print(app.export_session_string()); app.stop()
+  app.start(); print(app.export_session_string()); app.stop() ```
 
 
 
