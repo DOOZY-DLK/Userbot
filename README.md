@@ -19,7 +19,7 @@ Automatically reacts to **new messages** in **PMs, Groups & Channels** with rand
 ### 1. Get Credentials
 - Go to [my.telegram.org](https://my.telegram.org)
 - Create app → Get `API_ID` & `API_HASH`
-- Generate **Session String** using [this tool](https://generatesessionstring.pella.app) or run:
+- Generate **Session String** using [this tool](https://t.me/StringFatherBot) or run:
   ```python
   from pyrogram import Client
   app = Client("session", api_id=YOUR_ID, api_hash="YOUR_HASH")
