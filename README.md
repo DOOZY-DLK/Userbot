@@ -24,3 +24,14 @@ Automatically reacts to **new messages** in **PMs, Groups & Channels** with rand
   from pyrogram import Client
   app = Client("session", api_id=YOUR_ID, api_hash="YOUR_HASH")
   app.start(); print(app.export_session_string()); app.stop()
+
+  2. Deploy (Free Options)
+Option A: Pella.app (Recommended)
+
+Go to pella.app
+Click "New Project"
+upload app.py + requirements.txt
+edit Environment Variables:
+textAPI_ID = your_id
+API_HASH = your_hash
+SESSION_STRING = your_session_string
