@@ -28,7 +28,7 @@ Automatically reacts to **new messages** in **PMs, Groups & Channels** with rand
 
 
 ### 2. Deploy (Free Options)
-Option A: Pella.app (Recommended)
+Option A: [Pella.app](https://www.pella.app/  (Recommended))
 
 Go to pella.app
 Click "New Project"
