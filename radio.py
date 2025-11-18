@@ -7,8 +7,8 @@ from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 import asyncio
 
-from HasiiMusic import anon, app, config, db, lang, queue, tg, yt
-from HasiiMusic.helpers import buttons, utils
+from YOUR import anon, app, config, db, lang, queue, tg, yt
+from YOUR import buttons, utils
 
 # Set up logging
 LOGGER = logging.getLogger(__name__)
