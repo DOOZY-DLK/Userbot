@@ -2,7 +2,8 @@
 """
 Userbot-only combined app.py
 - Inline buttons and callbacks are handled by the user account.
-- Voice playback uses an assistant account (ASSISTANT_SESSION) + pytgcalls when available.
+- Voice playback uses an assistant account (ASSISTANT_SESSION) + pytgcalls when available,
+  or uses the userbot account's PyTgCalls if ASSISTANT_SESSION is not provided.
 - YouTube playback (extract) uses yt-dlp (yt_dlp).
 Replace existing app.py with this file.
 """
@@ -60,13 +61,13 @@ logger = logging.getLogger("dlk_userbot")
 API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = os.environ.get("API_HASH", "") or ""
 SESSION_STRING = os.environ.get("SESSION_STRING")
-ASSISTANT_SESSION = os.environ.get("ASSISTANT_SESSION")  # assistant user session string (required for VC)
+ASSISTANT_SESSION = os.environ.get("ASSISTANT_SESSION")  # assistant user session string (optional)
 MONGO_URI = os.environ.get("MONGO_URI", "")
 MONGO_DBNAME = os.environ.get("MONGO_DBNAME", "dlk_radio")
 OWNER_ID_ENV = os.environ.get("OWNER_ID")
 OWNER_ID: Optional[int] = int(OWNER_ID_ENV) if OWNER_ID_ENV else None
 
-# New: toggle inline player controls via environment
+# New: toggle inline player controls via environment (kept for compatibility)
 INLINE_CONTROLS = os.environ.get("INLINE_CONTROLS", "1") != "0"
 
 if not API_ID or not API_HASH:
@@ -84,14 +85,25 @@ user_app = Client(
 
 assistant = None
 call_py = None
+CALL_CLIENT = None  # client instance used by PyTgCalls (assistant or user_app)
+
 if ASSISTANT_SESSION:
     assistant = Client("assistant", api_id=API_ID, api_hash=API_HASH, session_string=ASSISTANT_SESSION, in_memory=True)
+    CALL_CLIENT = assistant
     if PyTgCalls:
         call_py = PyTgCalls(assistant)
     else:
         logger.warning("pytgcalls not available - voice playback disabled.")
 else:
-    logger.info("ASSISTANT_SESSION not provided — assistant/voice features disabled.")
+    # Use userbot's client for voice if pytgcalls is present and assistant isn't configured.
+    CALL_CLIENT = user_app
+    if PyTgCalls:
+        call_py = PyTgCalls(user_app)
+    else:
+        logger.info("pytgcalls not available - voice playback disabled (no assistant).")
+
+if not ASSISTANT_SESSION:
+    logger.info("ASSISTANT_SESSION not provided — attempting to use user account for VC if pytgcalls available.")
 
 # ===================== DB SETUP =====================
 mongo_client = None
@@ -393,22 +405,8 @@ async def _safe_call_py_method(method_name: str, *args, **kwargs):
         return None
 
 def player_controls_markup(chat_id: int):
-    # If user disabled inline controls via env var, return None
-    if not INLINE_CONTROLS:
-        return None
-    if chat_id in radio_paused:
-        controls = [
-            InlineKeyboardButton("▷", callback_data="radio_resume"),
-            InlineKeyboardButton("‣‣I", callback_data="music_skip"),
-            InlineKeyboardButton("▢", callback_data="radio_stop"),
-        ]
-    else:
-        controls = [
-            InlineKeyboardButton("II", callback_data="radio_pause"),
-            InlineKeyboardButton("‣‣I", callback_data="music_skip"),
-            InlineKeyboardButton("▢", callback_data="radio_stop"),
-        ]
-    return InlineKeyboardMarkup([controls, [InlineKeyboardButton("❌ Close", callback_data="radio_close")]])
+    # Inline player controls removed per request - return None so no inline buttons are posted.
+    return None
 
 async def update_radio_timer(chat_id: int, msg_id: int, title: str, start_time: float):
     while True:
@@ -517,7 +515,7 @@ async def play_entry(chat_id: int, entry: dict, reply_message: Optional[Message]
             radio_tasks[chat_id].cancel()
             radio_tasks.pop(chat_id, None)
         stream_source = entry["stream_url"]
-        # play via call_py (assistant)
+        # play via call_py (either assistant or user account)
         if not call_py:
             # fallback: just post the link
             try:
@@ -525,7 +523,42 @@ async def play_entry(chat_id: int, entry: dict, reply_message: Optional[Message]
             except Exception:
                 pass
             return True
+
+        # If the PyTgCalls instance is using assistant, ensure assistant is present in the chat.
+        if CALL_CLIENT is not None and CALL_CLIENT != user_app:
+            # CALL_CLIENT is assistant: make sure assistant is in chat
+            try:
+                assistant_user = await CALL_CLIENT.get_me()
+                assistant_id = assistant_user.id
+            except Exception:
+                assistant_id = None
+            assistant_present = False
+            if assistant_id:
+                try:
+                    await CALL_CLIENT.get_chat_member(chat_id, assistant_id)
+                    assistant_present = True
+                except Exception:
+                    assistant_present = False
+            if not assistant_present:
+                # try inviting assistant
+                try:
+                    invite = await user_app.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
+                    invite_link = invite.invite_link
+                    try:
+                        await CALL_CLIENT.join_chat(invite_link)
+                        assistant_present = True
+                    except Exception:
+                        # cannot auto-join assistant
+                        await user_app.send_message(chat_id, "Assistant not in group. Add it via invite link and retry.")
+                        await user_app.send_message(chat_id, invite_link)
+                        return False
+                except Exception:
+                    await user_app.send_message(chat_id, "Assistant not in this group. Please add the assistant account and try again.")
+                    return False
+
+        # Call play on the active PyTgCalls instance
         await _safe_call_py_method("play", chat_id, MediaStream(stream_source))
+
         thumb_path = None
         thumb_val = entry.get("thumbnail")
         title = entry.get("title") or "Unknown"
@@ -535,6 +568,7 @@ async def play_entry(chat_id: int, entry: dict, reply_message: Optional[Message]
             thumb_path = await get_thumb_from_url_or_webpage(thumb_val, entry.get("webpage"), title)
         else:
             thumb_path = None
+
         if thumb_path and os.path.isfile(thumb_path):
             try:
                 msg = await user_app.send_photo(chat_id, photo=thumb_path, caption=f"🎧 Now Playing: {title}", reply_markup=player_controls_markup(chat_id))
@@ -542,6 +576,7 @@ async def play_entry(chat_id: int, entry: dict, reply_message: Optional[Message]
                 msg = await user_app.send_photo(chat_id, photo="https://files.catbox.moe/3o9qj5.jpg", caption=f"🎧 Now Playing: {title}", reply_markup=player_controls_markup(chat_id))
         else:
             msg = await user_app.send_photo(chat_id, photo="https://files.catbox.moe/3o9qj5.jpg", caption=f"🎧 Now Playing: {title}", reply_markup=player_controls_markup(chat_id))
+
         start_time = time.time()
         store_play_state(chat_id, title, entry.get("stream_url"), msg.id, start_time, elapsed=0.0, paused=False)
         radio_tasks[chat_id] = asyncio.create_task(update_radio_timer(chat_id, msg.id, title, start_time))
@@ -587,26 +622,8 @@ async def track_watcher(chat_id: int, duration: int, msg_id: int):
 
 # ===================== UI: radio menu + controls =====================
 def radio_buttons(page: int = 0, per_page: int = 6):
-    stations = sorted(RADIO_STATION.keys())
-    total_pages = (len(stations) - 1) // per_page + 1
-    start = page * per_page
-    end = start + per_page
-    current = stations[start:end]
-    buttons = []
-    for i in range(0, len(current), 2):
-        row = [InlineKeyboardButton(current[i], callback_data=f"radio_play_{current[i]}")]
-        if i + 1 < len(current):
-            row.append(InlineKeyboardButton(current[i+1], callback_data=f"radio_play_{current[i+1]}"))
-        buttons.append(row)
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("◁", callback_data=f"radio_page_{page-1}"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("▷", callback_data=f"radio_page_{page+1}"))
-    if nav:
-        buttons.append(nav)
-    buttons.append([InlineKeyboardButton("❌ Close Menu", callback_data="radio_close")])
-    return InlineKeyboardMarkup(buttons)
+    # Inline radio buttons removed — return None to avoid showing them.
+    return None
 
 # ===================== PRIVILEGE CHECK =====================
 async def dlk_privilege_validator(subject: Any) -> bool:
@@ -654,7 +671,7 @@ async def user_help(client: Client, message: Message):
         "Userbot Help\n\n"
         "!react - Post control buttons to toggle Auto-React for this chat\n"
         "!setradio <url> - Save a radio URL for this chat\n"
-        "!radio - Show station menu\n"
+        "!radio - List stations or use: !radio <station-name> to play\n"
         "!play <query or URL> - Play YouTube or reply to audio to play local\n"
         "!help - Show this message\n"
     )
@@ -876,19 +893,80 @@ async def user_set_radio(client: Client, message: Message):
     set_radio(owner, chat_id, url)
     await message.reply_text("Saved radio URL. Use !radio to show it.")
 
-# radio menu
-@user_app.on_message(filters.command("radio", prefixes=["!", "/"]) & filters.me)
-async def user_show_radio(client: Client, message: Message):
+# radio command: list stations or play by name: "!radio HiruFM"
+@user_app.on_message(filters.command("radio", prefixes=["!", "/"]) & (filters.group | filters.channel | filters.me))
+async def cmd_radio_menu(_, message: Message):
     await ensure_owner_id()
     chat_id = message.chat.id
     owner = OWNER_ID
-    url = get_radio(owner, chat_id)
-    if url:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open Stream", url=url)]])
-        await message.reply_text(f"Radio for this chat:\n{url}", reply_markup=keyboard)
+    # If user supplied a station name or URL: play it directly
+    parts = message.text.split(maxsplit=1)
+    if len(parts) > 1:
+        target = parts[1].strip()
+        # if user provided a known station name (case-insensitive)
+        found = None
+        for name in RADIO_STATION:
+            if name.lower() == target.lower():
+                found = (name, RADIO_STATION[name])
+                break
+        # if provided a URL directly
+        url = None
+        title = None
+        if found:
+            title, url = found
+        elif target.startswith("http://") or target.startswith("https://"):
+            url = target
+            title = target
+        else:
+            await message.reply_text("Station not found. Use `!radio` to list stations.")
+            return
+
+        # Prepare entry and play
+        entry = {"title": title or "Radio", "stream_url": url, "webpage": None, "thumbnail": None, "duration": None, "is_local": False}
+        if not call_py:
+            await message.reply_text(f"▶️ {title}\n{url}")
+            return
+        # If CALL_CLIENT is assistant, ensure assistant is in chat, otherwise user_app will be used
+        if CALL_CLIENT is not None and CALL_CLIENT != user_app:
+            try:
+                assistant_user = await CALL_CLIENT.get_me()
+                assistant_id = assistant_user.id
+            except Exception:
+                assistant_id = None
+            assistant_present = False
+            if assistant_id:
+                try:
+                    await CALL_CLIENT.get_chat_member(chat_id, assistant_id)
+                    assistant_present = True
+                except Exception:
+                    assistant_present = False
+            if not assistant_present:
+                try:
+                    invite = await user_app.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
+                    invite_link = invite.invite_link
+                    try:
+                        await CALL_CLIENT.join_chat(invite_link)
+                        assistant_present = True
+                    except Exception:
+                        await message.reply_text("Assistant not in the group. Add it with the invite link and retry.")
+                        await message.reply_text(invite_link)
+                        return
+                except Exception:
+                    await message.reply_text("Assistant is not in this group. Please add the assistant account and try again.")
+                    return
+        ok = await play_entry(chat_id, entry, reply_message=message)
+        if ok:
+            await message.reply_text(f"▶️ Now playing: {entry['title']}")
+        else:
+            await message.reply_text("❌ Failed to play the requested station.")
         return
-    kb = radio_buttons(0)
-    await message.reply_text("📻 Radio Stations - choose one:", reply_markup=kb)
+
+    # No arg: list available stations and usage
+    lines = ["📻 Radio Stations (use `!radio <name>` to play):"]
+    for name in RADIO_STATION:
+        lines.append(f"- {name}")
+    lines.append("\nOr set a per-chat radio URL with `!setradio <url>`.")
+    await message.reply_text("\n".join(lines))
 
 # stations list command (shows station names & URLs)
 @user_app.on_message(filters.command("stations", prefixes=["!", "/"]) & filters.me)
@@ -898,38 +976,10 @@ async def cmd_stations(client: Client, message: Message):
         lines.append(f"- {name}: {url}")
     await message.reply_text("\n".join(lines))
 
-# play command: plays YouTube via assistant or local reply audio
+# play command: plays YouTube via call_py (assistant or user account) or local reply audio
 @user_app.on_message(filters.command("play", prefixes=["!", "/"]) & (filters.group | filters.channel))
 async def cmd_play(_, message: Message):
     chat_id = message.chat.id
-    # check assistant present or invite
-    if assistant and call_py:
-        try:
-            assistant_user = await assistant.get_me()
-            assistant_id = assistant_user.id
-        except Exception:
-            assistant_id = None
-        assistant_present = False
-        if assistant_id:
-            try:
-                await assistant.get_chat_member(chat_id, assistant_id)
-                assistant_present = True
-            except Exception:
-                assistant_present = False
-        if not assistant_present:
-            try:
-                invite = await user_app.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
-                invite_link = invite.invite_link
-                try:
-                    await assistant.join_chat(invite_link)
-                    assistant_present = True
-                except Exception:
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📎 Invite Link", url=invite_link)]])
-                    await message.reply_text("Assistant not in group. Add it using this invite link and then retry.", reply_markup=kb)
-                    return
-            except Exception:
-                await message.reply_text("Assistant is not in this group. Please add the assistant account and try again.")
-                return
 
     entry = None
     info_msg = None
@@ -972,6 +1022,7 @@ async def cmd_play(_, message: Message):
         except Exception:
             pass
         return
+
     ok = await play_entry(chat_id, entry, reply_message=message)
     if ok:
         try:
@@ -1019,115 +1070,20 @@ async def general_stop_handler(_, message: Message):
     await leave_voice_chat(chat_id)
     await message.reply_text("Stopped & cleaned up.")
 
-# radio menu command (owner or any user via userbot message)
-@user_app.on_message(filters.command("radio", prefixes=["!", "/"]) & (filters.group | filters.channel))
-async def cmd_radio_menu(_, message: Message):
-    chat_id = message.chat.id
-    kb = radio_buttons(0)
-    try:
-        await message.reply_text("📻 Radio Stations - choose one:", reply_markup=kb)
-    except Exception:
-        await message.reply_text("Failed to show radio menu.")
-
-# callbacks: radio play / pagination / close / pause / resume / stop / skip
+# If any old inline callbacks arrive for radio playback, inform user they are disabled.
 @user_app.on_callback_query(filters.regex("^radio_play_"))
 async def play_radio_station(_, query: CallbackQuery):
-    station = query.data.replace("radio_play_", "")
-    url = RADIO_STATION.get(station)
-    chat_id = query.message.chat.id
-    user = query.from_user
-    if not url:
-        return await query.answer("Station URL not found!", show_alert=True)
     try:
-        # ensure assistant presence
-        if assistant and call_py:
-            try:
-                assistant_user = await assistant.get_me()
-                assistant_id = assistant_user.id
-            except Exception:
-                assistant_id = None
-            assistant_present = False
-            if assistant_id:
-                try:
-                    await assistant.get_chat_member(chat_id, assistant_id)
-                    assistant_present = True
-                except RPCError:
-                    assistant_present = False
-            if not assistant_present:
-                try:
-                    invite = await user_app.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
-                    invite_link = invite.invite_link
-                    try:
-                        await assistant.join_chat(invite_link)
-                        assistant_present = True
-                    except Exception:
-                        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📎 Invite Link", url=invite_link)]])
-                        await query.message.reply_text("Assistant not in the group. Add it using this invite link and then retry.", reply_markup=kb)
-                        return
-                except Exception:
-                    await query.message.reply_text("Cannot create invite link. Please add the assistant account manually.")
-                    return
-            # cleanup previous
-            if chat_id in radio_tasks:
-                radio_tasks[chat_id].cancel()
-                radio_tasks.pop(chat_id, None)
-            await asyncio.sleep(1)
-            await _safe_call_py_method("play", chat_id, MediaStream(url))
-            try:
-                await query.message.edit_caption(
-                    caption=f"🎧 Connecting to {station}...",
-                    reply_markup=player_controls_markup(chat_id)
-                )
-            except Exception:
-                try:
-                    await query.message.edit_text(f"🎧 Connecting to {station}...", reply_markup=player_controls_markup(chat_id))
-                except Exception:
-                    pass
-            start_time = time.time()
-            # store state using last message id if possible
-            msg_id = getattr(query.message, "message_id", 0)
-            store_play_state(chat_id, station, url, msg_id, start_time, elapsed=0.0, paused=False)
-            radio_tasks[chat_id] = asyncio.create_task(update_radio_timer(chat_id, msg_id, station, start_time))
-            radio_paused.discard(chat_id)
-            await query.answer(f"Now playing {station} via assistant!", show_alert=False)
-            return
-        else:
-            # fallback: just post link
-            await query.message.reply_text(f"▶️ {station}\n{url}")
-            await query.answer("Assistant not configured — opened link instead.")
-            return
-    except FloodWait as e:
-        await leave_voice_chat(chat_id)
-        wait_time = getattr(e, "value", None) or getattr(e, "x", None) or "unknown"
-        await query.message.reply_text(f"⏳ Rate limit reached! Wait {wait_time} seconds.")
-        await query.answer(f"Wait {wait_time}s", show_alert=True)
-    except Exception as e:
-        await leave_voice_chat(chat_id)
-        logger.exception("General radio play error")
-        await query.message.reply_text(f"❌ Failed to start radio! Error: {e}")
+        await query.answer("Inline radio buttons disabled. Use /radio <station-name> or !radio <station-name> to play.", show_alert=True)
+    except Exception:
+        pass
 
 @user_app.on_callback_query(filters.regex(r"^radio_page_(\d+)$"))
 async def cb_radio_page(_, query: CallbackQuery):
     try:
-        m = re.match(r"radio_page_(\d+)", query.data)
-        if not m:
-            return await query.answer()
-        page = int(m.group(1))
-        kb = radio_buttons(page)
-        try:
-            await query.message.edit_text("📻 Radio Stations - choose one:", reply_markup=kb)
-        except Exception:
-            try:
-                await query.message.edit_reply_markup(reply_markup=kb)
-            except Exception:
-                pass
-        await query.answer()
-    except Exception as e:
-        logger.debug(f"radio_page handler failed: {e}")
-        try:
-            await query.answer("Failed to load page.", show_alert=True)
-        except Exception:
-            pass
+        await query.answer("Pagination disabled. Use /radio to list stations.", show_alert=True)
+    except Exception:
+        pass
 
 @user_app.on_callback_query(filters.regex(r"^radio_close$"))
 async def cb_radio_close(_, query: CallbackQuery):
@@ -1147,7 +1103,7 @@ async def cb_radio_close(_, query: CallbackQuery):
         except Exception:
             pass
 
-# playback controls callbacks
+# playback controls callbacks adjusted to still work if triggered (pause/resume/stop/skip)
 @user_app.on_callback_query(filters.regex("^music_skip$"))
 async def cb_music_skip(_, query: CallbackQuery):
     if not await dlk_privilege_validator(query):
@@ -1265,8 +1221,11 @@ async def start_all():
             pass
     if assistant:
         await assistant.start()
-        if call_py:
+    if call_py:
+        try:
             call_py.start()
+        except Exception:
+            logger.exception("Failed to start PyTgCalls")
     await ensure_owner_id()
     me = await user_app.get_me()
     logger.info(f"Userbot started as @{me.username or me.first_name} ({me.id})")
@@ -1276,6 +1235,8 @@ async def start_all():
             logger.info(f"Assistant started as @{a.username} ({a.id})")
         except Exception:
             logger.info("Assistant started (username unknown).")
+    if CALL_CLIENT is user_app:
+        logger.info("Using userbot account for voice (PyTgCalls attached to user_app).")
 
 async def stop_all():
     try:
