@@ -2,28 +2,24 @@
 """
 Combined Userbot + Control Bot + Radio assistant (single entry app.py)
 
-- Userbot runs as a user session (supports session_string).
-- Optional control-bot (BOT_TOKEN) handles deep-links from buttons posted by the userbot.
-- Optional assistant account (ASSISTANT_SESSION) + PyTgCalls manages voice chat playback.
-- MongoDB stores per-chat settings (auto-react and radio_url).
-- Reactive auto-react feature (random emoji) is run by the userbot account.
-- Userbot posts inline keyboards that open the control-bot for confirmation (ON/OFF/Set Radio).
-- The control-bot receives the /start payloads and updates DB (only the owner can change).
-- The DLK radio bot (bot account) provides richer radio menus & voice playback via the assistant.
+This simplified variant ensures all inline keyboards (react control + radio menus)
+are posted by your user account (userbot) and handled by your userbot. Control-bot
+(BOT_TOKEN) remains optional and is only used for deep-link handling if you wish.
+DLK_BOT_TOKEN is not required for menus to work. ASSISTANT_SESSION is optional and
+only used to enable voice-chat playback via PyTgCalls.
 
-Notes:
-- Designed for Pyrogram v2.2.13 and PyTgCalls usage.
-- yt-dlp is optional; if missing, /play (youtube) won't work.
-- Cookies for yt-dlp optional (YT_DLP_COOKIES env) — omitted handling will still work for many streams.
+How it works:
+- !react -> userbot posts inline buttons using callback_data (handled by userbot).
+- Set Radio button -> userbot prompts the owner in private to provide a stream URL.
+- !radio -> userbot shows saved radio URL or opens a menu with stations posted by userbot.
+- If ASSISTANT_SESSION + pytgcalls present, the assistant will be used for playback; else the stream URL is posted.
 """
 import os
 import sys
 import asyncio
 import logging
 import random
-import time
-from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -45,7 +41,7 @@ except Exception:
     PyTgCalls = None
     MediaStream = None
 
-# optional yt_dlp
+# optional yt_dlp (not used here but kept for compatibility)
 try:
     import yt_dlp as youtube_dl
 except Exception:
@@ -65,7 +61,7 @@ API_ID = int(os.environ.get("API_ID", "") or 0)
 API_HASH = os.environ.get("API_HASH", "") or ""
 SESSION_STRING = os.environ.get("SESSION_STRING")  # user session string (recommended)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  # control bot token (optional)
-DLK_BOT_TOKEN = os.environ.get("DLK_BOT_TOKEN")  # actual DLK radio bot token (optional)
+DLK_BOT_TOKEN = os.environ.get("DLK_BOT_TOKEN")  # not required for menu posting
 ASSISTANT_SESSION = os.environ.get("ASSISTANT_SESSION")  # assistant account session string (optional)
 MONGO_URI = os.environ.get("MONGO_URI", "")
 MONGO_DBNAME = os.environ.get("MONGO_DBNAME", "dlk_radio")
@@ -74,7 +70,6 @@ OWNER_ID: Optional[int] = int(OWNER_ID_ENV) if OWNER_ID_ENV else None
 
 if not API_ID or not API_HASH or not MONGO_URI:
     logger.critical("API_ID, API_HASH and MONGO_URI must be set in environment")
-    # We exit because DB is required for settings persistence in this combined app.
     raise SystemExit(1)
 
 # ===================== MONGO SETUP =====================
@@ -84,7 +79,6 @@ if mongo_client is None:
     raise SystemExit(1)
 db = mongo_client.get_database(MONGO_DBNAME)
 settings_coll = db.get_collection("react_settings")
-# optional playing state collection used by radio assistant
 playing_coll = db.get_collection("playing")
 
 # ===================== IN-MEMORY CACHES & CONSTANTS =====================
@@ -107,7 +101,6 @@ RADIO_STATION = {
 }
 
 # ===================== CLIENTS =====================
-# userbot client (supports session_string)
 user_app = Client(
     name="userbot",
     api_id=API_ID,
@@ -116,21 +109,12 @@ user_app = Client(
     in_memory=True,
 )
 
-# control bot - optional (handles /start deep links that userbot buttons open)
 control_bot = None
 if BOT_TOKEN:
     control_bot = Client("control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 else:
-    logger.warning("BOT_TOKEN not set — control bot disabled. Set BOT_TOKEN to enable it.")
+    logger.info("BOT_TOKEN not set — control bot disabled (optional).")
 
-# dlk radio bot - optional: provides radio menus & assists assistant join flow (if DLK_BOT_TOKEN provided)
-dlk_bot = None
-if DLK_BOT_TOKEN:
-    dlk_bot = Client("dlk_bot", api_id=API_ID, api_hash=API_HASH, bot_token=DLK_BOT_TOKEN, in_memory=True)
-else:
-    logger.info("DLK_BOT_TOKEN not set — radio bot UI disabled. You can still use userbot's radio features.")
-
-# assistant account (session string) for voice chat playback (PyTgCalls)
 assistant = None
 call_py = None
 if ASSISTANT_SESSION:
@@ -142,7 +126,7 @@ if ASSISTANT_SESSION:
 else:
     logger.info("ASSISTANT_SESSION not provided — assistant/voice features disabled.")
 
-# compatibility alias for any legacy code that expects `app`
+# compatibility alias
 app = user_app
 
 # ===================== DB UTIL FUNCTIONS =====================
@@ -193,11 +177,10 @@ async def ensure_owner_id():
     load_caches_for_owner(OWNER_ID)
     logger.info(f"Owner user id: {OWNER_ID}")
 
-# ===================== CONTROL-BOT HANDLERS (register if exists) =====================
+# ===================== CONTROL-BOT HANDLERS (optional) =====================
 def register_control_handlers(bot_client: Client):
     @bot_client.on_message(filters.command("start") & filters.private)
     async def bot_start(client: Client, message: Message):
-        # /start payload handling
         if len(message.command) < 2:
             await message.reply_text(
                 "Hello! This control bot toggles settings for the Userbot.\n"
@@ -206,11 +189,8 @@ def register_control_handlers(bot_client: Client):
             return
         payload = message.command[1]
         try:
-            # react_on_<owner>_<chat>
             if payload.startswith("react_on_") or payload.startswith("react_off_"):
-                # split only on prefix: react_on_ -> tail owner_chat
                 tail = payload.split("_", 2)[2]
-                # tail is "<owner>_<chat_id_or_peer>"
                 owner_str, chat_str = tail.split("_", 1)
                 owner = int(owner_str)
                 chat_id = int(chat_str)
@@ -221,7 +201,6 @@ def register_control_handlers(bot_client: Client):
                 enabled = payload.startswith("react_on_")
                 set_react_setting(owner, chat_id, enabled)
                 text = "🟢 Auto React ENABLED!" if enabled else "🔴 Auto React DISABLED!"
-                # try to notify the target chat (bot may not be a member)
                 posted = False
                 try:
                     await bot_client.send_message(chat_id, f"{text}\n(Changed by @{message.from_user.username or message.from_user.first_name})")
@@ -236,7 +215,6 @@ def register_control_handlers(bot_client: Client):
 
             if payload.startswith("setradio_"):
                 tail = payload.split("_", 1)[1]
-                # tail is "<owner>_<chat>"
                 parts = tail.split("_", 1)
                 if len(parts) != 2:
                     await message.reply_text("Invalid payload.")
@@ -300,32 +278,19 @@ async def user_help(client: Client, message: Message):
         bot_username = "<control bot not configured>"
     await message.reply_text(
         "Userbot Help\n\n"
-        "!react - Post control buttons to toggle Auto-React for this chat\n"
+        "!react - Post control buttons to toggle Auto-React for this chat (buttons handled by your account)\n"
         "!setradio <url> - Save a radio URL for this chat\n"
-        "!radio - Show saved radio link (Play button opens the stream URL)\n"
+        "!radio - Show saved radio link or display station menu\n"
         "!help - Show this message\n\n"
-        f"Control actions open @{bot_username} for confirmation (if configured). Only the owner can change settings."
+        f"Owner-only controls are handled by your user account. Control bot is optional: {bot_username}"
     )
 
 @user_app.on_message(filters.command("react", prefixes=["!", "/"]) & (filters.group | filters.channel) & filters.me)
 async def user_post_react_buttons(client: Client, message: Message):
     await ensure_owner_id()
-    if not control_bot:
-        await message.reply_text(
-            "Auto React Controller\n\nControl bot not configured (BOT_TOKEN missing). Set BOT_TOKEN to enable remote ON/OFF buttons."
-        )
-        return
-    try:
-        bot_user = await control_bot.get_me()
-        bot_username = bot_user.username or bot_user.first_name
-    except Exception:
-        bot_username = None
-    if not bot_username:
-        await message.reply_text("Control bot username not available. Ensure the control bot started correctly.")
-        return
-
     chat_id = message.chat.id
     owner_id = OWNER_ID
+
     on_payload = f"react_on_{owner_id}_{chat_id}"
     off_payload = f"react_off_{owner_id}_{chat_id}"
     setradio_payload = f"setradio_{owner_id}_{chat_id}"
@@ -333,11 +298,11 @@ async def user_post_react_buttons(client: Client, message: Message):
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🟢 ON", url=f"https://t.me/{bot_username}?start={on_payload}"),
-                InlineKeyboardButton("🔴 OFF", url=f"https://t.me/{bot_username}?start={off_payload}"),
+                InlineKeyboardButton("🟢 ON", callback_data=on_payload),
+                InlineKeyboardButton("🔴 OFF", callback_data=off_payload),
             ],
             [
-                InlineKeyboardButton("🔊 Set Radio", url=f"https://t.me/{bot_username}?start={setradio_payload}"),
+                InlineKeyboardButton("🔊 Set Radio", callback_data=setradio_payload),
                 InlineKeyboardButton("🎧 Show Radio", callback_data=f"show_radio_{owner_id}_{chat_id}"),
             ],
             [InlineKeyboardButton("Close", callback_data=f"close_{owner_id}_{chat_id}")],
@@ -345,17 +310,91 @@ async def user_post_react_buttons(client: Client, message: Message):
     )
     current = get_react_setting(owner_id, chat_id)
     await message.reply_text(
-        f"Auto React Controller\n\nChat: `{message.chat.title or message.chat.id}`\nStatus: `{'ON' if current else 'OFF'}`\n\nClick ON/OFF to open the control bot and confirm the change.",
+        f"Auto React Controller\n\nChat: `{message.chat.title or message.chat.id}`\nStatus: `{'ON' if current else 'OFF'}`\n\nOwner-only buttons — handled by your user account.",
         reply_markup=keyboard,
         disable_web_page_preview=True,
     )
 
-@user_app.on_callback_query(filters.regex(r"^show_radio_\d+_"))
-async def user_handle_show_radio(client: Client, cb: CallbackQuery):
+# React toggle handler (userbot)
+@user_app.on_callback_query(filters.regex(r"^react_(on|off)_\d+_"))
+async def user_handle_react_toggle(client: Client, cb: CallbackQuery):
+    await ensure_owner_id()
+    try:
+        parts = cb.data.split("_", 3)
+        _, state, owner_str, chat_str = parts
+        owner = int(owner_str)
+        chat_id = int(chat_str)
+    except Exception:
+        await cb.answer("Invalid payload", show_alert=True)
+        return
+    if cb.from_user.id != owner:
+        await cb.answer("You are not the owner for this setting.", show_alert=True)
+        return
+    enabled = state == "on"
+    set_react_setting(owner, chat_id, enabled)
+    text = "🟢 Auto React ENABLED!" if enabled else "🔴 Auto React DISABLED!"
+    try:
+        await user_app.send_message(chat_id, f"{text}\n(Changed by @{cb.from_user.username or cb.from_user.first_name})")
+        await cb.answer(text + " Notified the chat.")
+    except Exception:
+        await cb.answer(text + " (Could not post in the chat).")
+
+# Set radio via callback -> prompt owner privately
+@user_app.on_callback_query(filters.regex(r"^setradio_\d+_"))
+async def user_handle_setradio_cb(client: Client, cb: CallbackQuery):
     await ensure_owner_id()
     data = cb.data
     try:
-        _, owner_str, chat_str = data.split("_", 2)
+        _, tail = data.split("_", 1)
+        owner_str, chat_str = tail.split("_", 1)
+        owner = int(owner_str); chat_id = int(chat_str)
+    except Exception:
+        await cb.answer("Invalid payload", show_alert=True)
+        return
+    if cb.from_user.id != owner:
+        await cb.answer("This radio button is for the userbot owner only.", show_alert=True)
+        return
+    # Send prompt in private
+    try:
+        await user_app.send_message(owner, f"Send the radio stream URL (http/https) for chat {chat_id} or send 'cancel'. Waiting 120s.")
+    except Exception:
+        await cb.answer("Could not send private message. Make sure you can receive messages.", show_alert=True)
+        return
+    await cb.answer("Check your private messages to send the radio URL.", show_alert=False)
+    try:
+        resp = await user_app.listen(owner, filters=filters.user(owner) & filters.text, timeout=120)
+    except asyncio.TimeoutError:
+        try:
+            await user_app.send_message(owner, "Timed out waiting for URL. Cancelled.")
+        except Exception:
+            pass
+        return
+    if not resp or not getattr(resp, "text", None):
+        try:
+            await user_app.send_message(owner, "No URL received. Cancelled.")
+        except Exception:
+            pass
+        return
+    text = resp.text.strip()
+    if text.lower() == "cancel":
+        await user_app.send_message(owner, "Cancelled.")
+        return
+    if not (text.startswith("http://") or text.startswith("https://")):
+        await user_app.send_message(owner, "That doesn't look like a valid URL. Cancelled.")
+        return
+    set_radio(owner, chat_id, text)
+    await user_app.send_message(owner, "Saved radio URL for this chat.")
+    try:
+        await user_app.send_message(chat_id, f"🔊 Radio set by @{(resp.from_user.username or resp.from_user.first_name)}. Use the userbot !radio command to show it.")
+    except Exception:
+        pass
+
+# Show saved radio (userbot)
+@user_app.on_callback_query(filters.regex(r"^show_radio_\d+_"))
+async def user_handle_show_radio(client: Client, cb: CallbackQuery):
+    await ensure_owner_id()
+    try:
+        _, owner_str, chat_str = cb.data.split("_", 2)
         owner = int(owner_str); chat_id = int(chat_str)
     except Exception:
         await cb.answer("Invalid payload", show_alert=True)
@@ -367,7 +406,6 @@ async def user_handle_show_radio(client: Client, cb: CallbackQuery):
     if not url:
         await cb.answer("No radio URL saved for this chat.", show_alert=True)
         return
-    # Show a Play button that links directly to the stream (opens in external player)
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open Stream", url=url)]])
     try:
         await cb.message.reply_text(f"Radio for this chat:\n{url}", reply_markup=keyboard)
@@ -378,9 +416,8 @@ async def user_handle_show_radio(client: Client, cb: CallbackQuery):
 @user_app.on_callback_query(filters.regex(r"^close_\d+_"))
 async def user_handle_close(client: Client, cb: CallbackQuery):
     await ensure_owner_id()
-    data = cb.data
     try:
-        _, owner_str, _ = data.split("_", 2)
+        _, owner_str, _ = cb.data.split("_", 2)
         owner = int(owner_str)
     except Exception:
         await cb.answer("Invalid payload", show_alert=True)
@@ -394,6 +431,7 @@ async def user_handle_close(client: Client, cb: CallbackQuery):
     except Exception:
         await cb.answer("Could not delete message.", show_alert=True)
 
+# Auto react feature
 @user_app.on_message((filters.private | filters.group | filters.channel) & filters.incoming & ~filters.reply)
 async def auto_react(client: Client, message: Message):
     if getattr(message, "edit_date", None):
@@ -421,6 +459,7 @@ async def auto_react(client: Client, message: Message):
     except Exception:
         logger.exception("React failed")
 
+# Manual setradio command (owner)
 @user_app.on_message(filters.command("setradio", prefixes=["!", "/"]) & filters.me)
 async def user_set_radio(client: Client, message: Message):
     await ensure_owner_id()
@@ -441,22 +480,19 @@ async def user_set_radio(client: Client, message: Message):
     set_radio(owner, chat_id, url)
     await message.reply_text("Saved radio URL. Use !radio to show it.")
 
+# Show radio or station menu (userbot posts)
 @user_app.on_message(filters.command("radio", prefixes=["!", "/"]) & filters.me)
 async def user_show_radio(client: Client, message: Message):
     await ensure_owner_id()
     chat_id = message.chat.id
     owner = OWNER_ID
     url = get_radio(owner, chat_id)
-    if not url:
-        await message.reply_text("No radio URL saved for this chat. Use !setradio <url> to set one.")
+    if url:
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open Stream", url=url)]])
+        await message.reply_text(f"Radio for this chat:\n{url}", reply_markup=keyboard)
         return
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Open Stream", url=url)]])
-    await message.reply_text(f"Radio for this chat:\n{url}", reply_markup=keyboard)
 
-# ===================== DLK RADIO BOT (optional) - provides menu & playback via assistant =====================
-# If dlk_bot and assistant are provided, register DLK radio handlers on dlk_bot
-def register_dlk_bot_handlers(bot_client: Client):
-    # helper: radio buttons & player controls
+    # If no saved url, show built-in station menu posted by userbot
     def radio_buttons(page: int = 0, per_page: int = 6):
         stations = sorted(RADIO_STATION.keys())
         total_pages = (len(stations) - 1) // per_page + 1
@@ -479,128 +515,138 @@ def register_dlk_bot_handlers(bot_client: Client):
         buttons.append([InlineKeyboardButton("❌ Close Menu", callback_data="radio_close")])
         return InlineKeyboardMarkup(buttons)
 
-    def player_controls_markup(chat_id: int):
-        # minimal controls - they call back to the bot which will instruct assistant
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("II", callback_data="radio_pause"), InlineKeyboardButton("‣‣I", callback_data="music_skip"), InlineKeyboardButton("▢", callback_data="radio_stop")],
-            [InlineKeyboardButton("❌ Close", callback_data="radio_close")]
-        ])
+    kb = radio_buttons(0)
+    await message.reply_text("📻 Radio Stations - choose one:", reply_markup=kb)
 
-    @bot_client.on_message(filters.command("radio") & filters.group)
-    async def cmd_radio_menu(_, message: Message):
-        kb = radio_buttons(0)
-        await message.reply_text("📻 Radio Stations - choose one:", reply_markup=kb)
+# Radio callbacks (userbot handles all)
+@user_app.on_callback_query(filters.regex("^radio_play_"))
+async def user_play_radio_station(_, query: CallbackQuery):
+    station = query.data.replace("radio_play_", "")
+    url = RADIO_STATION.get(station)
+    chat_id = query.message.chat.id
+    if not url:
+        await query.answer("Station URL not found", show_alert=True)
+        return
 
-    @bot_client.on_callback_query(filters.regex("^radio_play_"))
-    async def play_radio_station(_, query: CallbackQuery):
-        # Called when a station button is pressed in a group
-        station = query.data.replace("radio_play_", "")
-        url = RADIO_STATION.get(station)
-        chat_id = query.message.chat.id
-        user = query.from_user
-        if not url:
-            await query.answer("Station URL not found", show_alert=True)
-            return
-
-        # If assistant not configured -> just send stream URL as fallback
-        if assistant is None or call_py is None:
-            try:
-                await query.message.reply_text(f"▶️ {station}\n{url}")
-            except Exception:
-                pass
-            await query.answer("Assistant not configured — opened link instead.")
-            return
-
-        # Ensure assistant is in the group (simplified: try joining via invite link)
+    # If assistant not configured -> just send stream URL as fallback
+    if assistant is None or call_py is None:
         try:
-            assistant_user = await assistant.get_me()
-            assistant_id = assistant_user.id
+            await query.message.reply_text(f"▶️ {station}\n{url}")
         except Exception:
-            assistant_id = None
+            pass
+        await query.answer("Assistant not configured — opened link instead.")
+        return
 
-        assistant_present = False
-        if assistant_id:
+    # Ensure assistant is in the group
+    try:
+        assistant_user = await assistant.get_me()
+        assistant_id = assistant_user.id
+    except Exception:
+        assistant_id = None
+
+    assistant_present = False
+    if assistant_id:
+        try:
+            await assistant.get_chat_member(chat_id, assistant_id)
+            assistant_present = True
+        except Exception:
+            assistant_present = False
+
+    if not assistant_present:
+        # create invite link with user account
+        try:
+            invite = await user_app.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
+            invite_link = invite.invite_link
             try:
-                await assistant.get_chat_member(chat_id, assistant_id)
+                await assistant.join_chat(invite_link)
                 assistant_present = True
             except Exception:
                 assistant_present = False
-
-        if not assistant_present:
-            # create invite link and attempt join
-            try:
-                invite = await bot_client.create_chat_invite_link(chat_id, member_limit=1, name="dlk_assistant_invite")
-                invite_link = invite.invite_link
-                try:
-                    await assistant.join_chat(invite_link)
-                    assistant_present = True
-                except Exception:
-                    assistant_present = False
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📎 Invite Link", url=invite_link)]])
-                    await query.message.reply_text("Assistant is not in the group. Add it using this invite link and then retry.", reply_markup=kb)
-                    await query.answer("Assistant missing", show_alert=True)
-                    return
-            except Exception:
-                await query.message.reply_text("Cannot create invite link. Please add the assistant account manually.")
-                await query.answer("Invite failed", show_alert=True)
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("📎 Invite Link", url=invite_link)]])
+                await query.message.reply_text("Assistant is not in the group. Add it using this invite link and then retry.", reply_markup=kb)
+                await query.answer("Assistant missing", show_alert=True)
                 return
+        except Exception:
+            await query.message.reply_text("Cannot create invite link. Please add the assistant account manually.")
+            await query.answer("Invite failed", show_alert=True)
+            return
 
-        # play using PyTgCalls
+    # play via PyTgCalls
+    try:
+        res = call_py.play(chat_id, MediaStream(url))
+        if asyncio.iscoroutine(res):
+            await res
         try:
-            # robust call: call_py.play may be sync/async depending on version
-            res = call_py.play(chat_id, MediaStream(url))
-            if asyncio.iscoroutine(res):
-                await res
-            # edit original message to show controls (if message is text)
+            await query.message.edit_text(f"🎧 Connecting to {station}...", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("II", callback_data="radio_pause"), InlineKeyboardButton("‣‣I", callback_data="music_skip"), InlineKeyboardButton("▢", callback_data="radio_stop")],
+                [InlineKeyboardButton("❌ Close", callback_data="radio_close")]
+            ]))
+        except Exception:
             try:
-                await query.message.edit_caption(f"🎧 Connecting to {station}...", reply_markup=player_controls_markup(chat_id))
+                await query.message.edit_caption(f"🎧 Connecting to {station}...")
             except Exception:
-                try:
-                    await query.message.edit_text(f"🎧 Connecting to {station}...", reply_markup=player_controls_markup(chat_id))
-                except Exception:
-                    pass
-            await query.answer(f"Now playing {station}", show_alert=False)
-        except Exception as e:
-            logger.exception("Failed to start playback via assistant")
+                pass
+        await query.answer(f"Now playing {station}", show_alert=False)
+    except Exception as e:
+        logger.exception("Failed to start playback via assistant")
+        try:
             await query.message.reply_text(f"Failed to start playback: {e}")
-            await query.answer("Failed to start", show_alert=True)
-
-    @bot_client.on_callback_query(filters.regex("^radio_page_"))
-    async def cb_radio_page(_, query: CallbackQuery):
-        try:
-            page = int(query.data.split("_")[-1])
-            kb = radio_buttons(page)
-            try:
-                await query.message.edit_text("📻 Radio Stations - choose one:", reply_markup=kb)
-            except Exception:
-                try:
-                    await query.message.edit_reply_markup(reply_markup=kb)
-                except Exception:
-                    pass
-            await query.answer()
         except Exception:
-            await query.answer()
+            pass
+        await query.answer("Failed to start", show_alert=True)
 
-    @bot_client.on_callback_query(filters.regex("^radio_close$"))
-    async def cb_radio_close(_, query: CallbackQuery):
+@user_app.on_callback_query(filters.regex("^radio_page_"))
+async def cb_radio_page_user(_, query: CallbackQuery):
+    try:
+        page = int(query.data.split("_")[-1])
+        # build pager
+        stations = sorted(RADIO_STATION.keys())
+        per_page = 6
+        total_pages = (len(stations) - 1) // per_page + 1
+        start = page * per_page
+        end = start + per_page
+        current = stations[start:end]
+        buttons = []
+        for i in range(0, len(current), 2):
+            row = [InlineKeyboardButton(current[i], callback_data=f"radio_play_{current[i]}")]
+            if i + 1 < len(current):
+                row.append(InlineKeyboardButton(current[i+1], callback_data=f"radio_play_{current[i+1]}"))
+            buttons.append(row)
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◁", callback_data=f"radio_page_{page-1}"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("▷", callback_data=f"radio_page_{page+1}"))
+        if nav:
+            buttons.append(nav)
+        buttons.append([InlineKeyboardButton("❌ Close Menu", callback_data="radio_close")])
+        kb = InlineKeyboardMarkup(buttons)
         try:
-            await query.message.delete()
+            await query.message.edit_text("📻 Radio Stations - choose one:", reply_markup=kb)
         except Exception:
             try:
-                await query.message.edit_reply_markup(reply_markup=None)
+                await query.message.edit_reply_markup(reply_markup=kb)
             except Exception:
                 pass
         await query.answer()
+    except Exception:
+        await query.answer()
 
-if dlk_bot:
-    register_dlk_bot_handlers(dlk_bot)
+@user_app.on_callback_query(filters.regex("^radio_close$"))
+async def cb_radio_close_user(_, query: CallbackQuery):
+    try:
+        await query.message.delete()
+    except Exception:
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await query.answer()
 
 # ===================== START/STOP & RUN helpers =====================
 async def start_all():
-    # start user app
     await user_app.start()
     if not SESSION_STRING:
-        # export session string for convenience (printed in logs)
         try:
             session_str = await user_app.export_session_string()
             logger.info("New session string generated. Please save it for future runs.")
@@ -608,15 +654,9 @@ async def start_all():
         except Exception:
             pass
 
-    # start control bot
     if control_bot:
         await control_bot.start()
 
-    # start dlk radio bot
-    if dlk_bot:
-        await dlk_bot.start()
-
-    # start assistant and pytgcalls
     if assistant:
         await assistant.start()
         if call_py:
@@ -631,12 +671,6 @@ async def start_all():
             logger.info(f"Control bot started as @{cb.username} ({cb.id})")
         except Exception:
             logger.info("Control bot started (username unknown).")
-    if dlk_bot:
-        try:
-            b = await dlk_bot.get_me()
-            logger.info(f"DLK bot started as @{b.username} ({b.id})")
-        except Exception:
-            logger.info("DLK bot started.")
     if assistant:
         try:
             a = await assistant.get_me()
@@ -656,11 +690,6 @@ async def stop_all():
     except Exception:
         pass
     try:
-        if dlk_bot:
-            await dlk_bot.stop()
-    except Exception:
-        pass
-    try:
         if control_bot:
             await control_bot.stop()
     except Exception:
@@ -674,7 +703,6 @@ def run():
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(start_all())
-        # keep running until ctrl+c
         from pyrogram import idle
         idle()
     except KeyboardInterrupt:
