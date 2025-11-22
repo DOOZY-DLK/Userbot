@@ -1,2 +1,6 @@
-pyrogram==2.0.106
-tgcrypto
+pyrogram
+tgcrypto 
+pymongo
+python-dotenv
+yt-dlp
+ffmpeg
