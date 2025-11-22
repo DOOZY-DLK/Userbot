@@ -66,6 +66,9 @@ MONGO_DBNAME = os.environ.get("MONGO_DBNAME", "dlk_radio")
 OWNER_ID_ENV = os.environ.get("OWNER_ID")
 OWNER_ID: Optional[int] = int(OWNER_ID_ENV) if OWNER_ID_ENV else None
 
+# New: toggle inline player controls via environment
+INLINE_CONTROLS = os.environ.get("INLINE_CONTROLS", "1") != "0"
+
 if not API_ID or not API_HASH:
     logger.critical("API_ID and API_HASH must be set in environment")
     raise SystemExit(1)
@@ -390,6 +393,9 @@ async def _safe_call_py_method(method_name: str, *args, **kwargs):
         return None
 
 def player_controls_markup(chat_id: int):
+    # If user disabled inline controls via env var, return None
+    if not INLINE_CONTROLS:
+        return None
     if chat_id in radio_paused:
         controls = [
             InlineKeyboardButton("▷", callback_data="radio_resume"),
@@ -653,7 +659,7 @@ async def user_help(client: Client, message: Message):
         "!help - Show this message\n"
     )
 
-# react controller
+# react controller (posts inline controller)
 @user_app.on_message(filters.command("react", prefixes=["!", "/"]) & (filters.group | filters.channel) & filters.me)
 async def user_post_react_buttons(client: Client, message: Message):
     await ensure_owner_id()
@@ -684,6 +690,23 @@ async def user_post_react_buttons(client: Client, message: Message):
         disable_web_page_preview=True,
     )
     logger.info(f"Posted react controller in chat {chat_id} (msg {sent.message_id})")
+
+# New handler: allow sending "!react on" or "!react off" as direct commands from owner
+@user_app.on_message(filters.regex(r"^(?:!|/)react\s+(on|off)$") & filters.me)
+async def user_react_onoff_cmd(client: Client, message: Message):
+    await ensure_owner_id()
+    m = re.match(r"^(?:!|/)react\s+(on|off)$", message.text.strip(), flags=re.I)
+    if not m:
+        return
+    val = m.group(1).lower()
+    owner = OWNER_ID
+    chat_id = message.chat.id
+    if val == "on":
+        set_react_setting(owner, chat_id, True)
+        await message.reply_text("🟢 Auto React ENABLED for this chat.")
+    else:
+        set_react_setting(owner, chat_id, False)
+        await message.reply_text("🔴 Auto React DISABLED for this chat.")
 
 @user_app.on_callback_query(filters.regex(r"^react_(on|off)_[\d-]+_[\d-]+$"))
 async def user_handle_react_toggle(client: Client, cb: CallbackQuery):
@@ -866,6 +889,14 @@ async def user_show_radio(client: Client, message: Message):
         return
     kb = radio_buttons(0)
     await message.reply_text("📻 Radio Stations - choose one:", reply_markup=kb)
+
+# stations list command (shows station names & URLs)
+@user_app.on_message(filters.command("stations", prefixes=["!", "/"]) & filters.me)
+async def cmd_stations(client: Client, message: Message):
+    lines = ["Available stations:"]
+    for name, url in RADIO_STATION.items():
+        lines.append(f"- {name}: {url}")
+    await message.reply_text("\n".join(lines))
 
 # play command: plays YouTube via assistant or local reply audio
 @user_app.on_message(filters.command("play", prefixes=["!", "/"]) & (filters.group | filters.channel))
